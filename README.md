@@ -33,13 +33,25 @@ uv sync
 
 ## Usage
 
-@TODO
-
 ### Configuration
 
 ### Build dataset (with BM25)
+```
+cd src
+uv run dataset.py
+```
 
 ### Fine-tune the LLM
+@TODO
 
 ### Evaluation
+```
+cd src
+uv run eval.py
+```
 
+
+## Notes & Next steps
+
+- The queries from the original MSMarco dataset that are used in this project are the one which have only one corresponding document. This could change in the future.
+- Implement logging system.

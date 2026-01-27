@@ -1,0 +1,4 @@
+data_path: ../data/
+top_k: 5
+doc_limit: 1000
+bm25_retriever_name: index_bm25
