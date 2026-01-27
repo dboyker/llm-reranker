@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+.databricks
+databricks.yml
+data/*
+*/index_bm25/*
+settings.json
+.env
