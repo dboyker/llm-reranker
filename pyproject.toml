@@ -16,6 +16,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "torch>=2.10.0",
     "transformers>=4.57.6",
+    "trl>=0.27.1",
 ]
 
 [tool.ruff]

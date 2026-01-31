@@ -9,9 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+.vscode*
 .databricks
 databricks.yml
-data/*
 */index_bm25/*
 settings.json
 .env
