@@ -1,4 +1,7 @@
 data_path: ../data/
 top_k: 5
-doc_limit: 1000
+doc_limit: 10000
 bm25_retriever_name: index_bm25
+model_id: google/gemma-3-1b-it
+pred_batch_size: 4
+pred_max_token: 100

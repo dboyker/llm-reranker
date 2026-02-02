@@ -10,7 +10,6 @@ Compared to traditional cross-encoder rerankers, LLMs offer several advantages:
 - **Explainability**: LLMs can justify their reranking.
 - **Task adaptability**: The same LLM can be adapted to different domains or ranking criteria (e.g. factuality, diversity, recency).
 
-
 ## Overview
 The pipeline:
 1. Build a reranking dataset using **BM25** as the first-stage retriever  
@@ -42,14 +41,16 @@ uv run dataset.py
 ```
 
 ### Fine-tune the LLM
-@TODO
+```
+cd src
+uv run train.py
+```
 
 ### Evaluation
 ```
 cd src
 uv run eval.py
 ```
-
 
 ## Notes & Next steps
 
