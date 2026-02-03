@@ -6,6 +6,7 @@ from pathlib import Path
 
 import bm25s
 import ir_datasets
+import numpy as np
 import Stemmer
 import yaml
 
@@ -13,23 +14,21 @@ DATASET = "msmarco-passage"
 SPLITS = ["train/judged", "dev/judged"]
 STEMMER = Stemmer.Stemmer("english")
 PROMPT_TEMPLATE = (
-    "Instruction:\n"
+    "### Instructions ###\n"
     "You are an expert ranking assistant. Your task is to rerank the following "
-    "list of items according to their relevance to the given query. Consider all "
-    "items together (listwise) and return only the ids of the items, from most "
-    "relevant to least relevant."
-    "- Do not include the item text or scores, only the IDs."
-    "- Return each ID exactly once" 
+    "list of documents according to their relevance to the given query."
+    "Rank documents higher if they directly answer the query with clear, factual information."
+    "Consider all items together (listwise) and return only the ids of the items, from most "
+    "relevant to least relevant.\n"
+    "- Do not include the item text or scores, only the IDs.\n"
+    "- Return each ID exactly once\n" 
     "- Do not add or remove IDs\n\n"
-    "Query:\n"
+    "### Query ###\n"
     "{query}\n\n"
-    "Items to rank:\n"
+    "### Documents ###\n"
     "{items}\n\n"
-    "Output Format:\n"
-    "[id1, id2, id3, ..., idN]\n\n"
-    "Example:\n"
-    "If item with id 24 is most relevant, item with id 13 second, and item with id 31 least, return:\n"
-    "[24, 13, 31]"
+    "### Output format ###\n"
+    "most_relevant_id, second_relevant_id, third_relevant_id, fourth_relevant_id, fifth_relevant_id\n\n"
 )
 RNG = random.Random(42)
 
@@ -71,9 +70,10 @@ def compute_top_k(retriever: bm25s.BM25, queries: dict, doc_ids, top_k: int) -> 
 
 def get_prompt(query: str, top_k_ids: list[str], top_k_texts: list[str]):
     """Create a reranking prompt for a given query and its top k corresponding documents (as given by BM25)."""
+    ordered_idx = np.argsort(top_k_ids)
     items = list(zip(top_k_ids, top_k_texts))
-    RNG.shuffle(items)  # We shuffle the candidates so the model does not memorize order
-    formatted_items = "\n\n".join(f"ID: {i}. {text}" for i, text in items)
+    ordered_items = [items[i] for i in ordered_idx]
+    formatted_items = "\n".join(f"{i}. {text}" for i, text in ordered_items)
     prompt = PROMPT_TEMPLATE.format(query=query, items=formatted_items)
     return prompt
 
@@ -84,13 +84,34 @@ def build_list_of_prompts(queries: dict, docs: dict, qrels: dict, top_k: dict) -
     for q_id, query in queries.items():
         top_k_ids = top_k[q_id]  # Corresponding top_k
         top_k_texts = [docs[i] for i in top_k_ids]
-        prompt = get_prompt(query, top_k_ids, top_k_texts)
         relevant_id = qrels[q_id]
-        best_ranking_ids = top_k_ids.copy()
-        if relevant_id in best_ranking_ids:  # @TODO: only works if one best id
-            best_ranking_ids.remove(relevant_id)
-            best_ranking_ids.insert(0, relevant_id)
-        dataset.append({"prompt": prompt, "completion": str(best_ranking_ids), "top_k": top_k_ids, "relevant_id": relevant_id})
+        
+        # Permutation to avoid "memorizing" a position pattern
+        permutation_ids = np.random.permutation(len(top_k_ids)).tolist() 
+        top_k_ids = [top_k_ids[i] for i in permutation_ids]
+        top_k_texts = [top_k_texts[i] for i in permutation_ids]
+
+        # Mapping + replace
+        id_mapping = {k: v for k, v in zip(permutation_ids, top_k_ids)}
+        if relevant_id not in top_k_ids:
+            id_mapping[-1] = relevant_id
+            relevant_id = -1
+        else:
+            relevant_id = permutation_ids[top_k_ids.index(relevant_id)]
+        top_k_ids = permutation_ids
+        
+        # Build prompt and completion target for LLM
+        prompt = get_prompt(query, top_k_ids, top_k_texts)
+        completion = top_k_ids.copy()
+        if relevant_id in completion:  # @TODO: only works if one best id
+            completion.remove(relevant_id)
+            completion.insert(0, relevant_id)
+        completion = str(completion).replace("[", "").replace("]", "")
+        entry = {"prompt": prompt, "completion": completion, "top_k": top_k_ids, "relevant_id": relevant_id, "id_mapping": id_mapping}
+        print(prompt)
+        print(completion)
+        dataset.append(entry)
+        print("-")
     return dataset
 
 
@@ -125,7 +146,6 @@ def build_dataset(doc_limit: int, bm25_retriever_name: str, top_k: int, split: s
     return dataset
 
 
-
 def main():
     """Fetch MSMarco data -> BM25 → sanity check → build listwise reranking dataset."""
     # Open Config
@@ -150,8 +170,6 @@ def main():
             for entry in dataset:
                 json.dump(entry, f)
                 f.write("\n")
-
-
 
 
 if __name__ == "__main__":
