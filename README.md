@@ -33,6 +33,7 @@ uv sync
 ## Usage
 
 ### Configuration
+@TODO
 
 ### Build dataset (with BM25)
 ```
@@ -44,6 +45,16 @@ uv run dataset.py
 ```
 cd src
 uv run train.py
+```
+
+### Inference
+```
+cd src
+uv run infer.py [--model-type {base,fine-tuned} ...] [--dataset {train,validation}]
+```
+Example usage for inference of using the fine-tuned model on the validation dataset:
+```
+uv run infer.py --model-type fine-tuned --dataset validation
 ```
 
 ### Evaluation
