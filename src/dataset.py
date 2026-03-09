@@ -86,32 +86,34 @@ def build_list_of_prompts(queries: dict, docs: dict, qrels: dict, top_k: dict) -
         top_k_texts = [docs[i] for i in top_k_ids]
         relevant_id = qrels[q_id]
         
-        # Permutation to avoid "memorizing" a position pattern
-        permutation_ids = np.random.permutation(len(top_k_ids)).tolist() 
-        top_k_ids = [top_k_ids[i] for i in permutation_ids]
-        top_k_texts = [top_k_texts[i] for i in permutation_ids]
-
-        # Mapping + replace
-        id_mapping = {k: v for k, v in zip(permutation_ids, top_k_ids)}
-        if relevant_id not in top_k_ids:
-            id_mapping[-1] = relevant_id
-            relevant_id = -1
-        else:
-            relevant_id = permutation_ids[top_k_ids.index(relevant_id)]
-        top_k_ids = permutation_ids
-        
-        # Build prompt and completion target for LLM
-        prompt = get_prompt(query, top_k_ids, top_k_texts)
+        # Target completion
         completion = top_k_ids.copy()
-        if relevant_id in completion:  # @TODO: only works if one best id
+        if relevant_id in completion:
             completion.remove(relevant_id)
             completion.insert(0, relevant_id)
+
+        # Shuffling
+        permutation_ids = np.random.permutation(len(top_k_ids)).tolist()  # @TODO: seed
+        top_k_ids = [top_k_ids[i] for i in permutation_ids]
+        top_k_texts = [top_k_texts[i] for i in permutation_ids]
+        id_mapping = {t: i for i, t in enumerate(top_k_ids)}
+
+        # Replace ids
+        top_k_ids = [id_mapping[k] for k in top_k_ids]
+        completion = [id_mapping[k] for k in completion]
+        if relevant_id not in id_mapping:
+            id_mapping[relevant_id] = -1
+        relevant_id = id_mapping[relevant_id]
+        
+        # Build dataset entry
+        id_mapping = {v: k for k, v in id_mapping.items()}
         completion = str(completion).replace("[", "").replace("]", "")
+        prompt = get_prompt(query, top_k_ids, top_k_texts)
         entry = {"prompt": prompt, "completion": completion, "top_k": top_k_ids, "relevant_id": relevant_id, "id_mapping": id_mapping}
         print(prompt)
         print(completion)
-        dataset.append(entry)
         print("-")
+        dataset.append(entry)
     return dataset
 
 

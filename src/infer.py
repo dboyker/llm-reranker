@@ -6,7 +6,7 @@ from pathlib import Path
 import dotenv
 import numpy as np
 import yaml
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from transformers import pipeline
 
 dotenv.load_dotenv()
@@ -42,27 +42,33 @@ def parse_pred(pred: str, top_k: int) -> list[str]:
     return pred_ids
 
 
-def infer(dataset, pipe) -> np.ndarray:
-    # @TODO: implement batching
-    preds = []
-    for prompt, completion in zip(dataset["prompt"], dataset["completion"]):
-        messages = [{"role": "user", "content": prompt}]
-        out = pipe(messages, use_cache=False)  # @TODO: investigate why use_cache is necessary to avoid crashing here
-        pred = out[-1]["generated_text"][-1]["content"]
-        pred_ids = parse_pred(pred, config["top_k"])
-        print(pred_ids, completion)
-        preds.append(pred_ids)
-    return np.array(preds)
+def infer(dataset: Dataset, pipe: pipeline, top_k: int, batch_size: int) -> np.ndarray:
+    """Inference function."""
+    pred_ids = np.zeros((len(dataset["prompt"]), top_k))
+    pred_texts = np.zeros(len(dataset["prompt"]), dtype=object)
+
+    messages = [[{"role": "user", "content": p}] for p in dataset["prompt"]]
+    outputs = pipe(messages, batch_size=batch_size)
+
+    for idx, out in enumerate(outputs):
+        out_text = out[-1]["generated_text"][-1]["content"]
+        out_id = parse_pred(out_text, top_k)
+
+        pred_ids[idx, :] = out_id
+        pred_texts[idx] = out_text
+
+    return pred_ids
 
 
-def main(config, dataset_name, model_types) -> None:
+def main(config: dict, dataset_name: str, model_types: list[str]) -> None:
     dataset = load_dataset(config["data_path"])[dataset_name]
 
     model_to_hf_id = {"base": config["model_id"], "fine-tuned": config["fine_tuned_model_path"]}
     for m in model_types:
+        print(m)
         hf_model_id = model_to_hf_id[m]
         out_name = "pred_" + hf_model_id + ".npy"
-        out_name = out_name.replace("/", "_").replace("-", "_")
+        out_name = out_name.replace("/", "_").replace("-", "_").replace("__", "_")
     
         # Pipeline
         pipe = pipeline(
@@ -74,7 +80,7 @@ def main(config, dataset_name, model_types) -> None:
             )
 
         # Predictions
-        preds = infer(dataset, pipe)
+        preds = infer(dataset, pipe, config["top_k"], config["pred_batch_size"])
         
         # Save
         np.save(Path(config["data_path"]) / out_name, preds)
