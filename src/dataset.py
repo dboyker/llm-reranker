@@ -4,147 +4,110 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
-import bm25s
 import ir_datasets
-import numpy as np
-import Stemmer
+import torch
 import yaml
+from tqdm import tqdm
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-DATASET = "msmarco-passage"
-SPLITS = ["train/judged", "dev/judged"]
-STEMMER = Stemmer.Stemmer("english")
+DATASET = "wikir/en1k"
+SPLITS = ["training", "validation"]
 PROMPT_TEMPLATE = (
     "### Instructions ###\n"
-    "You are an expert ranking assistant. Your task is to rerank the following "
-    "list of documents according to their relevance to the given query."
-    "Rank documents higher if they directly answer the query with clear, factual information."
-    "Consider all items together (listwise) and return only the ids of the items, from most "
-    "relevant to least relevant.\n"
-    "- Do not include the item text or scores, only the IDs.\n"
-    "- Return each ID exactly once\n" 
-    "- Do not add or remove IDs\n\n"
+    "You are an expert ranking assistant. Your task is to find the most relevant document given a query"
+    "Consider all items together (listwise) and return only the ID of the most relevant item"
+    "Do not include the item text or scores, only the ID.\n"
     "### Query ###\n"
     "{query}\n\n"
     "### Documents ###\n"
     "{items}\n\n"
-    "### Output format ###\n"
-    "most_relevant_id, second_relevant_id, third_relevant_id, fourth_relevant_id, fifth_relevant_id\n\n"
-)
+    )
 RNG = random.Random(42)
-
-
-def get_queries_and_qrels(dataset: ir_datasets.datasets.base.Dataset) -> tuple[dict, dict]:
-    """From a ir_dataset, create and retur 2 dicts: one for queries, one for the qrels.
-    
-    Keep only the queries that have only one relevant document.
-    """
-    qrels = defaultdict(list)
-    for q in dataset.qrels_iter():
-        qrels[q.query_id].append(q.doc_id)
-    qrels = {k: v[0] for k, v in qrels.items() if len(v) == 1}
-    queries = {q.query_id: q.text for q in dataset.queries_iter() if q.query_id in qrels.keys()}
-    return queries, qrels
-
-
-def index_and_save_bm25_retriever(document_corpus: list[str], bm25_retriever_name: str) -> None:
-    """Create a bm25 index based on a document corpus. Save the index locally."""
-    corpus_tokens = bm25s.tokenize(document_corpus, stopwords="en", stemmer=STEMMER)
-    retriever = bm25s.BM25()
-    retriever.index(corpus_tokens)
-    retriever.save(bm25_retriever_name)
-
-
-def compute_top_k(retriever: bm25s.BM25, queries: dict, doc_ids, top_k: int) -> dict:
-    """Compute the top k closest documents from a series of queries.
-    
-    The documents are indexed in the bm25s retriever.
-    
-    The document ids (doc_ids) must be provided in the indexing order, so the function can return them, reranked.
-    """
-    query_tokens = bm25s.tokenize([v for _, v in queries.items()], stemmer=STEMMER)
-    results, _ = retriever.retrieve(query_tokens, k=top_k)
-    query_keys = list(queries.keys())
-    top_k = {query_keys[qi]: [doc_ids[di] for di in r] for qi, r in enumerate(results)}
-    return top_k
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+RERANKING_MODEL_ID = "BAAI/bge-reranker-base"
 
 
 def get_prompt(query: str, top_k_ids: list[str], top_k_texts: list[str]):
     """Create a reranking prompt for a given query and its top k corresponding documents (as given by BM25)."""
-    ordered_idx = np.argsort(top_k_ids)
-    items = list(zip(top_k_ids, top_k_texts))
-    ordered_items = [items[i] for i in ordered_idx]
-    formatted_items = "\n".join(f"{i}. {text}" for i, text in ordered_items)
+    formatted_items = "\n\n".join(f"{i}. {text}" for i, text in list(zip(top_k_ids, top_k_texts)))
     prompt = PROMPT_TEMPLATE.format(query=query, items=formatted_items)
     return prompt
 
 
-def build_list_of_prompts(queries: dict, docs: dict, qrels: dict, top_k: dict) -> list[dict]:
+def build_list_of_prompts(queries: dict, docs: dict, qrels: dict, scoreddocs: dict, reranked_scoreddocs: dict) -> list[dict]:
     """Build and return a dataset (list of dict) containing the reranking prompts."""
     dataset = []
-    for q_id, query in queries.items():
-        top_k_ids = top_k[q_id]  # Corresponding top_k
-        top_k_texts = [docs[i] for i in top_k_ids]
-        relevant_id = qrels[q_id]
-        
-        # Target completion
-        completion = top_k_ids.copy()
-        if relevant_id in completion:
-            completion.remove(relevant_id)
-            completion.insert(0, relevant_id)
-
-        # Shuffling
-        permutation_ids = np.random.permutation(len(top_k_ids)).tolist()  # @TODO: seed
-        top_k_ids = [top_k_ids[i] for i in permutation_ids]
-        top_k_texts = [top_k_texts[i] for i in permutation_ids]
-        id_mapping = {t: i for i, t in enumerate(top_k_ids)}
-
-        # Replace ids
-        top_k_ids = [id_mapping[k] for k in top_k_ids]
-        completion = [id_mapping[k] for k in completion]
-        if relevant_id not in id_mapping:
-            id_mapping[relevant_id] = -1
-        relevant_id = id_mapping[relevant_id]
-        
-        # Build dataset entry
-        id_mapping = {v: k for k, v in id_mapping.items()}
-        completion = str(completion).replace("[", "").replace("]", "")
-        prompt = get_prompt(query, top_k_ids, top_k_texts)
-        entry = {"prompt": prompt, "completion": completion, "top_k": top_k_ids, "relevant_id": relevant_id, "id_mapping": id_mapping}
-        print(prompt)
-        print(completion)
-        print("-")
+    for q_id, doc_ids in qrels.items():
+        q_text = queries[q_id]
+        d_id = doc_ids[0]
+        if q_id not in reranked_scoreddocs:  # Should be removed
+            continue
+        reranked_ids = reranked_scoreddocs[q_id][:5]  # @TODO: hardcode?
+        RNG.shuffle(reranked_ids)  # We shuffle the list to avoid the model to learn the order
+        reranked_docs = [docs[i] for i in reranked_ids]
+        id_mapping = {str(i): idx for i, idx in enumerate(reranked_ids)}
+        if d_id not in reranked_ids:
+            id_mapping["-1"] = d_id
+        inv_id_mapping = {v: k for k, v in id_mapping.items()}
+        completion = inv_id_mapping[d_id]  # ID to be returned by LLM
+        prompt = get_prompt(q_text, id_mapping.keys(), reranked_docs)
+        entry = {
+            "prompt": prompt,
+            "completion": completion,
+            "id_mapping": id_mapping,
+            "relevant_doc_id": d_id,
+            "top_k_bm25": scoreddocs[q_id],
+            "top_k_bge": reranked_scoreddocs[q_id],
+            }
         dataset.append(entry)
     return dataset
 
 
-def build_dataset(doc_limit: int, bm25_retriever_name: str, top_k: int, split: str) -> list[dict]:
+def load_ir_dataset(split):
+    """Load a dataset using ir_datasets. Return the different components of the dataset."""
+    ds = ir_datasets.load(f"{DATASET}/{split}")
+    qrels = defaultdict(list)
+    for q in ds.qrels_iter():
+        if q.relevance != 2:
+            continue
+        qrels[q.query_id].append(q.doc_id)
+    queries = {q.query_id: q.text for q in ds.queries_iter()}
+    docs = {x.doc_id: x.text for x in ds.docs_iter()}
+    scoreddocs = defaultdict(list)
+    for p in ds.scoreddocs_iter():
+        scoreddocs[p.query_id].append(p.doc_id)
+    return queries, docs, qrels, scoreddocs
+
+
+def rerank_documents(queries: dict, docs: dict, scoreddocs: dict) -> dict:
+    print("Reranking")
+    tokenizer = AutoTokenizer.from_pretrained(RERANKING_MODEL_ID)
+    model = AutoModelForSequenceClassification.from_pretrained(RERANKING_MODEL_ID).to(DEVICE)
+    model.eval()
+    reranked_scoreddocs = {}
+    for query_id, doc_ids in tqdm(list(scoreddocs.items())[:100]):
+        pairs = [[queries[query_id], docs[d_id]] for d_id in doc_ids]
+        with torch.no_grad():
+            inputs = tokenizer(pairs, padding=True, truncation=True, return_tensors='pt', max_length=512).to(DEVICE)
+            scores = model(**inputs, return_dict=True).logits.view(-1, ).float()
+            sorted_ids = torch.argsort(scores, descending=True).cpu().numpy()
+            bm25_results = scoreddocs[query_id]
+            reranked_scoreddocs[query_id] = [bm25_results[i] for i in sorted_ids]
+    return reranked_scoreddocs
+
+
+def build_dataset(split: str) -> list[dict]:
     """Build and return a reranking dataset for a given MSMarco split."""
     # Fetch data
     print("Fetch data")
-    ds = ir_datasets.load(f"{DATASET}/{split}")
-    queries, qrels = get_queries_and_qrels(dataset=ds)
-    docs = {x.doc_id: x.text for x in ds.docs_iter()[:doc_limit]}
+    queries, docs, qrels, scoreddocs = load_ir_dataset(split)
 
-    # Freeze doc ordering
-    doc_ids = list(docs.keys())
-    doc_texts = [docs[d] for d in doc_ids]
-
-    # Apply doc limit
-    doc_ids_set = set(docs.keys())
-    qrels = {k: v for k, v in qrels.items() if v in doc_ids_set}
-    queries = {k: v for k, v in queries.items() if k in qrels.keys()}
-    
-    # Index bm25 retriever
-    print("Index and save BM25")
-    index_and_save_bm25_retriever(document_corpus=doc_texts, bm25_retriever_name=bm25_retriever_name)
-    retriever = bm25s.BM25.load("index_bm25", load_corpus=False)
-
-    print("Retrieve top_k with BM25")
-    top_k = compute_top_k(retriever, queries=queries, doc_ids=doc_ids, top_k=top_k)
+    # Apply reranking
+    reranked_scoreddocs = rerank_documents()
 
     # Build dataset
     print("Build dataset")
-    dataset = build_list_of_prompts(queries, docs, qrels, top_k)
+    dataset = build_list_of_prompts(queries, docs, qrels, scoreddocs, reranked_scoreddocs)
     return dataset
 
 
@@ -156,13 +119,7 @@ def main():
 
     for split in SPLITS:
         print(f"Processing split {split}")
-
-        dataset = build_dataset(
-            doc_limit=config["doc_limit"],
-            bm25_retriever_name=config["bm25_retriever_name"],
-            top_k=config["top_k"],
-            split=split
-            )
+        dataset = build_dataset(split=split)
         
         # Save results
         print("Save dataset")
