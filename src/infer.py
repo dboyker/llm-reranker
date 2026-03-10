@@ -1,13 +1,14 @@
 """Inference script."""
 import argparse
-import os
 from pathlib import Path
 
 import dotenv
 import numpy as np
+import torch
 import yaml
 from datasets import Dataset, load_dataset
-from transformers import pipeline
+from tqdm import tqdm
+from transformers import AutoTokenizer, BitsAndBytesConfig, Gemma3ForCausalLM, pipeline
 
 dotenv.load_dotenv()
 
@@ -30,33 +31,33 @@ def parse_args():
     return parser.parse_args()
 
 
-def parse_pred(pred: str, top_k: int) -> list[str]:
-    # Delete all elements that are not numerical or ","
-    pred = "".join(c for c in pred if (c.isdigit()) or (c == ","))
-    pred_ids = pred.lstrip(",").split(",")
-    pred_ids = [x for x in pred_ids if x != ""]
-    # We make sure the size of the pred is top_k: pad or cut
-    pred_ids += [-9] * top_k
-    pred_ids = pred_ids[:top_k]
-    pred_ids = [int(x) for x in pred_ids]
-    return pred_ids
-
-
-def infer(dataset: Dataset, pipe: pipeline, top_k: int, batch_size: int) -> np.ndarray:
-    """Inference function."""
-    pred_ids = np.zeros((len(dataset["prompt"]), top_k))
-    pred_texts = np.zeros(len(dataset["prompt"]), dtype=object)
-
-    messages = [[{"role": "user", "content": p}] for p in dataset["prompt"]]
-    outputs = pipe(messages, batch_size=batch_size)
-
-    for idx, out in enumerate(outputs):
-        out_text = out[-1]["generated_text"][-1]["content"]
-        out_id = parse_pred(out_text, top_k)
-
-        pred_ids[idx, :] = out_id
-        pred_texts[idx] = out_text
-
+def infer_bis(dataset: Dataset, model, tokenizer, max_new_token: int):
+    pred_ids = np.zeros(shape=(len(dataset), 5), dtype=object)
+    for i, entry in enumerate(tqdm(dataset)):
+        messages = [[{"role": "user", "content": [{"type": "text", "text": entry["prompt"]}]}]]  # @TODO: add system prompt?
+        inputs = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(model.device)
+        with torch.inference_mode():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_token,
+                return_dict_in_generate=True,
+                output_scores=True,
+                do_sample=False)  # output_logits=True?
+        # Extract ranking based on logits (of the digits)
+        digit_ids = [tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(5)]  # TODO: hardcoding
+        logits = outputs.scores[0][0]
+        probs = torch.softmax(logits, dim=-1)
+        sorted_ids = np.argsort([probs[tid].item() for tid in digit_ids])[::-1]
+        # Sorted ids to actual ids
+        id_mapping = entry["id_mapping"]
+        ids = [id_mapping[str(i)] for i in sorted_ids]
+        pred_ids[i, :] = ids
     return pred_ids
 
 
@@ -64,23 +65,17 @@ def main(config: dict, dataset_name: str, model_types: list[str]) -> None:
     dataset = load_dataset(config["data_path"])[dataset_name]
 
     model_to_hf_id = {"base": config["model_id"], "fine-tuned": config["fine_tuned_model_path"]}
-    for m in model_types:
-        print(m)
-        hf_model_id = model_to_hf_id[m]
+    model_types = ["base"]
+    for m_type in model_types:
+        print(m_type)
+        hf_model_id = model_to_hf_id[m_type]
         out_name = "pred_" + hf_model_id + ".npy"
         out_name = out_name.replace("/", "_").replace("-", "_").replace("__", "_")
     
-        # Pipeline
-        pipe = pipeline(
-            "text-generation",
-            model=hf_model_id,
-            max_new_tokens=20,
-            do_sample=False,
-            token=os.getenv("HF_TOKEN"),
-            )
-
-        # Predictions
-        preds = infer(dataset, pipe, config["top_k"], config["pred_batch_size"])
+        # Prediction bis
+        model = Gemma3ForCausalLM.from_pretrained(hf_model_id, quantization_config=BitsAndBytesConfig(load_in_8bit=True)).eval()
+        tokenizer = AutoTokenizer.from_pretrained(hf_model_id)    
+        preds = infer_bis(dataset, model, tokenizer, max_new_token=config["pred_max_token"])
         
         # Save
         np.save(Path(config["data_path"]) / out_name, preds)
