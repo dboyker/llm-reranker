@@ -22,9 +22,9 @@ PROMPT_TEMPLATE = (
     "### Documents ###\n"
     "{items}\n\n"
     )
-RNG = random.Random(42)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 RERANKING_MODEL_ID = "BAAI/bge-reranker-base"
+rng = random.Random(42)
 
 
 def get_prompt(query: str, top_k_ids: list[str], top_k_texts: list[str]):
@@ -34,7 +34,7 @@ def get_prompt(query: str, top_k_ids: list[str], top_k_texts: list[str]):
     return prompt
 
 
-def build_list_of_prompts(queries: dict, docs: dict, qrels: dict, scoreddocs: dict, reranked_scoreddocs: dict) -> list[dict]:
+def build_list_of_prompts(queries: dict, docs: dict, qrels: dict, scoreddocs: dict, reranked_scoreddocs: dict, reranking_top_k: int) -> list[dict]:
     """Build and return a dataset (list of dict) containing the reranking prompts."""
     dataset = []
     for q_id, doc_ids in qrels.items():
@@ -42,8 +42,8 @@ def build_list_of_prompts(queries: dict, docs: dict, qrels: dict, scoreddocs: di
         d_id = doc_ids[0]
         if q_id not in reranked_scoreddocs:  # Should be removed
             continue
-        reranked_ids = reranked_scoreddocs[q_id][:5]  # @TODO: hardcode?
-        RNG.shuffle(reranked_ids)  # We shuffle the list to avoid the model to learn the order
+        reranked_ids = reranked_scoreddocs[q_id][:reranking_top_k]
+        rng.shuffle(reranked_ids)  # We shuffle the list to avoid the model to learn the order
         reranked_docs = [docs[i] for i in reranked_ids]
         id_mapping = {str(i): idx for i, idx in enumerate(reranked_ids)}
         if d_id not in reranked_ids:
@@ -80,6 +80,10 @@ def load_ir_dataset(split):
 
 
 def rerank_documents(queries: dict, docs: dict, scoreddocs: dict) -> dict:
+    """Rerank the initial ranking provided in scoreddocs.
+    
+    The scoreddocs results are the one from BM25.
+    """
     print("Reranking")
     tokenizer = AutoTokenizer.from_pretrained(RERANKING_MODEL_ID)
     model = AutoModelForSequenceClassification.from_pretrained(RERANKING_MODEL_ID).to(DEVICE)
@@ -96,30 +100,29 @@ def rerank_documents(queries: dict, docs: dict, scoreddocs: dict) -> dict:
     return reranked_scoreddocs
 
 
-def build_dataset(split: str) -> list[dict]:
+def build_dataset(split: str, reranking_top_k: int) -> list[dict]:
     """Build and return a reranking dataset for a given MSMarco split."""
     # Fetch data
     print("Fetch data")
     queries, docs, qrels, scoreddocs = load_ir_dataset(split)
 
     # Apply reranking
-    reranked_scoreddocs = rerank_documents()
+    reranked_scoreddocs = rerank_documents(queries, docs, scoreddocs)
 
     # Build dataset
     print("Build dataset")
-    dataset = build_list_of_prompts(queries, docs, qrels, scoreddocs, reranked_scoreddocs)
+    dataset = build_list_of_prompts(queries, docs, qrels, scoreddocs, reranked_scoreddocs, reranking_top_k)
     return dataset
 
 
 def main():
-    """Fetch MSMarco data -> BM25 → sanity check → build listwise reranking dataset."""
     # Open Config
     with open("../config/config.yml") as f:
         config = yaml.safe_load(f)
 
     for split in SPLITS:
         print(f"Processing split {split}")
-        dataset = build_dataset(split=split)
+        dataset = build_dataset(split=split, reranking_top_k=config["reranking_top_k"])
         
         # Save results
         print("Save dataset")

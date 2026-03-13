@@ -8,7 +8,7 @@ import torch
 import yaml
 from datasets import Dataset, load_dataset
 from tqdm import tqdm
-from transformers import AutoTokenizer, BitsAndBytesConfig, Gemma3ForCausalLM, pipeline
+from transformers import AutoTokenizer, BitsAndBytesConfig, Gemma3ForCausalLM
 
 dotenv.load_dotenv()
 
@@ -19,7 +19,7 @@ def parse_args():
         "--model-type",
         nargs="+",
         choices=["base", "fine-tuned"],
-        default=["base", "fine-tuned"],
+        default=["base"],
         help="Model(s) to use."
     )
     parser.add_argument(
@@ -31,8 +31,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def infer_bis(dataset: Dataset, model, tokenizer, max_new_token: int):
-    pred_ids = np.zeros(shape=(len(dataset), 5), dtype=object)
+def infer(dataset: Dataset, model, tokenizer, max_new_token: int):
+    # Setup results
+    top_k_reranking = len([k for k in dataset[0]["id_mapping"] if k != "-1"])
+    pred_ids = np.zeros(shape=(len(dataset), top_k_reranking), dtype=object)
+
+    # Inference ofor each dataset entry
     for i, entry in enumerate(tqdm(dataset)):
         messages = [[{"role": "user", "content": [{"type": "text", "text": entry["prompt"]}]}]]  # @TODO: add system prompt?
         inputs = tokenizer.apply_chat_template(
@@ -49,12 +53,14 @@ def infer_bis(dataset: Dataset, model, tokenizer, max_new_token: int):
                 return_dict_in_generate=True,
                 output_scores=True,
                 do_sample=False)  # output_logits=True?
+            
         # Extract ranking based on logits (of the digits)
-        digit_ids = [tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(5)]  # TODO: hardcoding
+        digit_ids = [tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(top_k_reranking)]
         logits = outputs.scores[0][0]
         probs = torch.softmax(logits, dim=-1)
         sorted_ids = np.argsort([probs[tid].item() for tid in digit_ids])[::-1]
-        # Sorted ids to actual ids
+        
+        # Sorted ids -> actual ids
         id_mapping = entry["id_mapping"]
         ids = [id_mapping[str(i)] for i in sorted_ids]
         pred_ids[i, :] = ids
@@ -63,19 +69,23 @@ def infer_bis(dataset: Dataset, model, tokenizer, max_new_token: int):
 
 def main(config: dict, dataset_name: str, model_types: list[str]) -> None:
     dataset = load_dataset(config["data_path"])[dataset_name]
-
     model_to_hf_id = {"base": config["model_id"], "fine-tuned": config["fine_tuned_model_path"]}
-    model_types = ["base"]
+
+    # Inference over all the specified model types
     for m_type in model_types:
-        print(m_type)
+        
+        # Select model ID and prepare results file
+        print(f"Inference using: {m_type}")
         hf_model_id = model_to_hf_id[m_type]
         out_name = "pred_" + hf_model_id + ".npy"
         out_name = out_name.replace("/", "_").replace("-", "_").replace("__", "_")
     
-        # Prediction bis
-        model = Gemma3ForCausalLM.from_pretrained(hf_model_id, quantization_config=BitsAndBytesConfig(load_in_8bit=True)).eval()
+        # Inference
+        quant_config = BitsAndBytesConfig(load_in_8bit=True)
+        model = Gemma3ForCausalLM.from_pretrained(hf_model_id, quantization_config=quant_config)
+        model = model.eval()
         tokenizer = AutoTokenizer.from_pretrained(hf_model_id)    
-        preds = infer_bis(dataset, model, tokenizer, max_new_token=config["pred_max_token"])
+        preds = infer(dataset, model, tokenizer, max_new_token=config["pred_max_token"])
         
         # Save
         np.save(Path(config["data_path"]) / out_name, preds)
