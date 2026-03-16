@@ -1,8 +1,7 @@
 data_path: ../data/
-top_k: 5
-doc_limit: 5000
-bm25_retriever_name: index_bm25
+reranking_top_k: 10
 model_id: google/gemma-3-1b-it
 fine_tuned_model_path: /dbfs/llm_reranker
 pred_batch_size: 1
-pred_max_token: 100
+pred_max_token: 1
+eval_ks: [1, 5, 10, 100]
