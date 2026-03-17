@@ -14,9 +14,10 @@ DATASET = "wikir/en1k"
 SPLITS = ["training", "validation"]
 PROMPT_TEMPLATE = (
     "### Instructions ###\n"
-    "You are an expert ranking assistant. Your task is to find the most relevant document given a query"
-    "Consider all items together (listwise) and return only the ID of the most relevant item"
-    "Do not include the item text or scores, only the ID.\n"
+    "You are an expert ranking assistant. Your task is to find the most relevant document given a query.\n"
+    "- Before selecting the best document, rate each document’s relevance on a scale from 0 to 10, then choose the most relevant document.\n"
+    "- return only the ID of the most relevant item.\n"
+    "- Do not include the item text or scores, only the ID.\n\n"
     "### Query ###\n"
     "{query}\n\n"
     "### Documents ###\n"
@@ -29,7 +30,7 @@ rng = random.Random(42)
 
 def get_prompt(query: str, top_k_ids: list[str], top_k_texts: list[str]):
     """Create a reranking prompt for a given query and its top k corresponding documents (as given by BM25)."""
-    formatted_items = "\n\n".join(f"{i}. {text}" for i, text in list(zip(top_k_ids, top_k_texts)))
+    formatted_items = "\n\n".join(f"[{i}] {text}" for i, text in list(zip(top_k_ids, top_k_texts)))
     prompt = PROMPT_TEMPLATE.format(query=query, items=formatted_items)
     return prompt
 
@@ -47,7 +48,7 @@ def build_list_of_prompts(queries: dict, docs: dict, qrels: dict, scoreddocs: di
         reranked_docs = [docs[i] for i in reranked_ids]
         id_mapping = {str(i): idx for i, idx in enumerate(reranked_ids)}
         if d_id not in reranked_ids:
-            id_mapping["-1"] = d_id
+            id_mapping["-"] = d_id
         inv_id_mapping = {v: k for k, v in id_mapping.items()}
         completion = inv_id_mapping[d_id]  # ID to be returned by LLM
         prompt = get_prompt(q_text, id_mapping.keys(), reranked_docs)
@@ -89,7 +90,7 @@ def rerank_documents(queries: dict, docs: dict, scoreddocs: dict) -> dict:
     model = AutoModelForSequenceClassification.from_pretrained(RERANKING_MODEL_ID).to(DEVICE)
     model.eval()
     reranked_scoreddocs = {}
-    for query_id, doc_ids in tqdm(list(scoreddocs.items())[:100]):
+    for query_id, doc_ids in tqdm(list(scoreddocs.items())[:1000]):
         pairs = [[queries[query_id], docs[d_id]] for d_id in doc_ids]
         with torch.no_grad():
             inputs = tokenizer(pairs, padding=True, truncation=True, return_tensors='pt', max_length=512).to(DEVICE)
