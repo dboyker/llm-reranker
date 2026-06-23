@@ -30,7 +30,7 @@ rng = random.Random(42)
 
 def get_prompt(query: str, top_k_ids: list[str], top_k_texts: list[str]):
     """Create a reranking prompt for a given query and its top k corresponding documents (as given by BM25)."""
-    formatted_items = "\n\n".join(f"[{i}] {text}" for i, text in list(zip(top_k_ids, top_k_texts)))
+    formatted_items = "\n\n".join(f"ID: {i}\nDocument: {text}" for i, text in list(zip(top_k_ids, top_k_texts)))
     prompt = PROMPT_TEMPLATE.format(query=query, items=formatted_items)
     return prompt
 
@@ -52,6 +52,8 @@ def build_list_of_prompts(queries: dict, docs: dict, qrels: dict, scoreddocs: di
         inv_id_mapping = {v: k for k, v in id_mapping.items()}
         completion = inv_id_mapping[d_id]  # ID to be returned by LLM
         prompt = get_prompt(q_text, id_mapping.keys(), reranked_docs)
+        print(completion)
+        print(prompt)
         entry = {
             "prompt": prompt,
             "completion": completion,

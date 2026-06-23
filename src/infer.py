@@ -19,7 +19,7 @@ def parse_args():
         "--model-type",
         nargs="+",
         choices=["base", "fine-tuned"],
-        default=["base"],
+        default=["base", "fine-tuned"],
         help="Model(s) to use."
     )
     parser.add_argument(
@@ -31,21 +31,24 @@ def parse_args():
     return parser.parse_args()
 
 
-def infer(dataset: Dataset, model, tokenizer, max_new_token: int):
+def infer(dataset: Dataset, model, tokenizer, max_new_token: int = 1, show_progress: bool = True):
     # Setup results
-    top_k_reranking = len([k for k in dataset[0]["id_mapping"] if k != "-1"])
+    top_k_reranking = len([k for k in dataset[0]["id_mapping"] if k.isdigit()])
     pred_ids = np.zeros(shape=(len(dataset), top_k_reranking), dtype=object)
 
-    # Inference ofor each dataset entry
-    for i, entry in enumerate(tqdm(dataset)):
+    # Inference for each dataset entry
+    iterable = tqdm(dataset) if show_progress else dataset
+    for i, entry in enumerate(iterable):
         messages = [[{"role": "user", "content": [{"type": "text", "text": entry["prompt"]}]}]]  # @TODO: add system prompt?
+        device = next(model.parameters()).device
         inputs = tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-        ).to(model.device)
+        ).to(device)
+        
         with torch.inference_mode():
             outputs = model.generate(
                 **inputs,
@@ -55,11 +58,10 @@ def infer(dataset: Dataset, model, tokenizer, max_new_token: int):
                 do_sample=False)  # output_logits=True?
             
         # Extract ranking based on logits (of the digits)
-        digit_ids = [tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(top_k_reranking)]
+        digit_ids = [tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(top_k_reranking)]  # @TODO: does not work if we dont use digits
         logits = outputs.scores[0][0]
         probs = torch.softmax(logits, dim=-1)
         sorted_ids = np.argsort([probs[tid].item() for tid in digit_ids])[::-1]
-        
         # Sorted ids -> actual ids
         id_mapping = entry["id_mapping"]
         ids = [id_mapping[str(i)] for i in sorted_ids]
@@ -81,8 +83,7 @@ def main(config: dict, dataset_name: str, model_types: list[str]) -> None:
         out_name = out_name.replace("/", "_").replace("-", "_").replace("__", "_")
     
         # Inference
-        quant_config = BitsAndBytesConfig(load_in_8bit=True)
-        model = Gemma3ForCausalLM.from_pretrained(hf_model_id, quantization_config=quant_config)
+        model = Gemma3ForCausalLM.from_pretrained(hf_model_id, device_map="auto", torch_dtype=torch.float16)
         model = model.eval()
         tokenizer = AutoTokenizer.from_pretrained(hf_model_id)    
         preds = infer(dataset, model, tokenizer, max_new_token=config["pred_max_token"])
